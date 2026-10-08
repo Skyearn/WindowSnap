@@ -16,7 +16,7 @@ permissions:
 jobs:
   release:
     name: 打包并发布
-    runs-on: macos-14
+    runs-on: macos-26
 
     steps:
       - name: 取出代码
