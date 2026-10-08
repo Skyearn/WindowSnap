@@ -120,7 +120,7 @@ struct GeneralSettingsView: View {
                             Text(layout.displayName).tag(layout.id.uuidString)
                         }
                     }
-                    Text("插拔外接显示器、合盖唤醒、改分辨率之后自动把窗口摆回去——这是 Stay 最实用的场景。")
+                    Text("插拔外接显示器、合盖唤醒、修改分辨率后，自动把窗口恢复到该布局。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -169,7 +169,7 @@ struct AboutSettingsView: View {
                         Text("WindowSnap").font(.title2).bold()
                         Text("窗口布局记忆工具 · 版本 \(version)")
                             .foregroundStyle(.secondary)
-                        Text("灵感来自已经下架的 Stay，用 Accessibility API 自己实现了一遍。")
+                        Text("基于 macOS Accessibility API 实现，不依赖私有接口。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

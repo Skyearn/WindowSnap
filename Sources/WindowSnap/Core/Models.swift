@@ -242,7 +242,7 @@ struct Layout: Codable, Identifiable, Hashable {
     var windows: [WindowSnapshot] = []
     /// 一键恢复用的全局快捷键
     var hotKey: HotKeySpec?
-    /// 这些应用启动时自动恢复本布局（Stay 的 trigger app）
+    /// 这些应用启动时自动恢复本布局
     var triggerBundleIDs: [String] = []
 
     /// 只保留启用的窗口
