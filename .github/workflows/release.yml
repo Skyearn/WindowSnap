@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号，不带 v（例如 1.0.0）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 打包并发布
+    runs-on: macos-14
+
+    steps:
+      - name: 取出代码
+        uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "版本号：$VERSION"
+
+      # --- 可选：导入 Developer ID 证书 ---------------------------------
+      # 配置了 MACOS_CERT_P12（base64 过的 .p12）才会执行，
+      # 没配就走 ad-hoc 签名（用户首次打开需要右键「打开」绕过 Gatekeeper）
+      - name: 导入签名证书
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_P12:-}" ]; then
+            echo "没有配置 MACOS_CERT_P12，使用 ad-hoc 签名"
+            exit 0
+          fi
+          KEYCHAIN="${RUNNER_TEMP}/build.keychain"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$CERT_P12" | base64 --decode > "${RUNNER_TEMP}/cert.p12"
+          security import "${RUNNER_TEMP}/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(.*\)".*/\1/p' | head -1)"
+          echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "签名身份：${IDENTITY}"
+
+      - name: 编译并打包
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          UNIVERSAL: '1'
+          REQUIRE_DMG: '1'
+        run: ./scripts/package.sh "$VERSION"
+
+      - name: 自检
+        run: ./build/WindowSnap.app/Contents/MacOS/WindowSnap --selftest
+
+      # --- 可选：公证 ---------------------------------------------------
+      # 需要 APPLE_ID / APPLE_TEAM_ID / APPLE_APP_PASSWORD 三个 secret
+      - name: 公证并装订
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_ID:-}" ]; then
+            echo "没有配置公证用的 secrets，跳过"
+            exit 0
+          fi
+          xcrun notarytool submit "dist/WindowSnap-$VERSION.dmg" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple "dist/WindowSnap-$VERSION.dmg"
+          xcrun stapler staple build/WindowSnap.app
+          # staple 之后重新压一份 zip，让它也带上装订票据
+          rm -f "dist/WindowSnap-$VERSION.zip"
+          ditto -c -k --keepParent build/WindowSnap.app "dist/WindowSnap-$VERSION.zip"
+
+      - name: 生成校验和
+        working-directory: dist
+        run: |
+          shasum -a 256 ./* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WindowSnap ${{ steps.version.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+          files: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS.txt

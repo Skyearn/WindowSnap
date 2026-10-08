@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# 同一个分支连续推送时，取消上一次没跑完的
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 编译 + 自检
+    runs-on: macos-14
+
+    steps:
+      - name: 取出代码
+        uses: actions/checkout@v4
+
+      - name: 工具链版本
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: 编译
+        run: ./scripts/build.sh release
+
+      - name: 自检
+        # 自检不需要辅助功能权限，在 CI 上可以完整跑
+        run: ./build/WindowSnap.app/Contents/MacOS/WindowSnap --selftest
+
+      - name: 命令行模式冒烟
+        run: |
+          ./build/WindowSnap.app/Contents/MacOS/WindowSnap --help
+          ./build/WindowSnap.app/Contents/MacOS/WindowSnap --doctor
+
+      - name: 打包成 zip
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent build/WindowSnap.app dist/WindowSnap-ci.zip
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowSnap-ci
+          path: dist/WindowSnap-ci.zip
+          retention-days: 7
