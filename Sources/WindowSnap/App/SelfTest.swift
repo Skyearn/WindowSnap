@@ -379,6 +379,31 @@ enum SelfTest {
         check(clearedSettings.hotKey(for: .restoreLayout) == nil, "清除之后不会被默认值顶回来")
         actionDefaults.removePersistentDomain(forName: actionSuite)
 
+        group("并行与缓存")
+
+        let scanDefaults = ScanOptions()
+        check(scanDefaults.maxConcurrentApps == 4, "扫描默认并行处理 4 个应用")
+
+        let restoreDefaults = WindowRestorer.Options()
+        check(restoreDefaults.maxConcurrentApps == 4, "恢复默认并行处理 4 个应用")
+
+        let cacheFirst = ScreenGeometry.currentDisplays
+        let cacheSecond = ScreenGeometry.currentDisplays
+        check(cacheFirst.count == cacheSecond.count, "显示器列表走缓存，两次结果一致")
+        ScreenGeometry.invalidateDisplayCache()
+        let cacheThird = ScreenGeometry.currentDisplays
+        check(cacheThird.count == cacheFirst.count, "清掉缓存后重新查询结果一致")
+
+        let perfSuite = "com.windowsnap.selftest.perf"
+        let perfDefaults = UserDefaults(suiteName: perfSuite) ?? UserDefaults.standard
+        perfDefaults.removePersistentDomain(forName: perfSuite)
+        let perfSettings = AppSettings(defaults: perfDefaults)
+        check(perfSettings.parallelWorkers == 4, "并行数默认 4")
+        perfSettings.parallelWorkers = 8
+        check(AppSettings(defaults: perfDefaults).parallelWorkers == 8, "并行数改动会持久化")
+        check(perfSettings.restorerOptions.maxConcurrentApps == 8, "恢复选项跟着设置走")
+        perfDefaults.removePersistentDomain(forName: perfSuite)
+
         print("")
         print("通过 \(passed) 项，失败 \(failed) 项")
         if failed == 0 {

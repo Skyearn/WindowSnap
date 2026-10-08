@@ -93,6 +93,22 @@ struct GeneralSettingsView: View {
                 Text("恢复布局时如果需要先打开某个应用，会等它把窗口交出来，最多等这么久。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                HStack {
+                    Text("并行处理的应用数")
+                    Slider(value: Binding(
+                        get: { Double(settings.parallelWorkers) },
+                        set: { settings.parallelWorkers = Int($0.rounded()) }
+                    ), in: 1...8, step: 1)
+                    .frame(width: 180)
+                    Text("\(settings.parallelWorkers)")
+                        .monospacedDigit()
+                        .frame(width: 50, alignment: .trailing)
+                }
+                Text("扫描和恢复都是按应用并行的（同一个应用内部仍然串行，避免它自己的窗口管理逻辑打架）。"
+                     + "窗口多的时候调大更快，但也更吃 CPU；默认 4 通常够用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("自动恢复") {

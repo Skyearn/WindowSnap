@@ -47,8 +47,22 @@ enum ScreenGeometry {
         return CGMainDisplayID()
     }
 
+    private static let displayCacheLock = NSLock()
+    private static var cachedDisplays: [DisplayInfo] = []
+    private static var cachedAt = Date.distantPast
+
+    /// 显示器列表。
+    ///
+    /// NSScreen 查询并不便宜，而扫描 / 恢复一个布局会问它几百次，
+    /// 所以这里加一层短 TTL 缓存：一次操作内拿到的是同一份快照，
+    /// 又不必几百次重复查询。
     static var currentDisplays: [DisplayInfo] {
-        NSScreen.screens.enumerated().map { index, screen in
+        displayCacheLock.lock()
+        defer { displayCacheLock.unlock() }
+        if cachedDisplays.isEmpty == false, Date().timeIntervalSince(cachedAt) < 2.0 {
+            return cachedDisplays
+        }
+        let displays = NSScreen.screens.enumerated().map { index, screen -> DisplayInfo in
             let id = displayID(of: screen)
             return DisplayInfo(id: id,
                                index: index,
@@ -56,6 +70,17 @@ enum ScreenGeometry {
                                frame: CGDisplayBounds(id),
                                visibleFrame: cocoaToQuartz(screen.visibleFrame))
         }
+        cachedDisplays = displays
+        cachedAt = Date()
+        return displays
+    }
+
+    /// 显示器配置变了就清掉缓存
+    static func invalidateDisplayCache() {
+        displayCacheLock.lock()
+        defer { displayCacheLock.unlock() }
+        cachedDisplays = []
+        cachedAt = .distantPast
     }
 
     static func display(withID id: CGDirectDisplayID) -> DisplayInfo? {

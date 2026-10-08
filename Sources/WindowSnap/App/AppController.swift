@@ -210,9 +210,11 @@ final class AppController: ObservableObject {
         scanning = true
         statusBar?.showBusy("正在扫描窗口…")
         let excluded = settings.excludedBundleIDs
+        let maxWorkers = settings.parallelWorkers
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var options = ScanOptions()
             options.excludedBundleIDs = excluded
+            options.maxConcurrentApps = maxWorkers
             let snapshots = WindowScanner.snapshot(options: options)
             DispatchQueue.main.async {
                 self?.scanning = false
@@ -558,6 +560,7 @@ final class AppController: ObservableObject {
     // MARK: - 自动触发
 
     private func handleDisplayConfigurationChange() {
+        ScreenGeometry.invalidateDisplayCache()
         guard settings.autoRestoreOnDisplayChange else { return }
         guard let id = settings.displayChangeLayoutUUID, let layout = store.layout(id: id) else { return }
         guard !isRestoring else { return }

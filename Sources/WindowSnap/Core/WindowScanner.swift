@@ -9,66 +9,104 @@ struct ScanOptions {
     /// 太小的窗口（浮窗、提示条）不记录
     var minimumWidth: CGFloat = 60
     var minimumHeight: CGFloat = 40
+    /// 同时扫几个应用
+    var maxConcurrentApps = 4
 }
 
 /// 扫描当前所有普通应用的窗口，生成快照
 enum WindowScanner {
 
+    // MARK: - 全部窗口
+
     static func snapshot(options: ScanOptions = ScanOptions()) -> [WindowSnapshot] {
-        var zOrder = windowZOrder()
-        var result: [WindowSnapshot] = []
         let myPID = ProcessInfo.processInfo.processIdentifier
+        let apps: [(app: NSRunningApplication, bundleID: String)] =
+            NSWorkspace.shared.runningApplications.compactMap { app in
+                guard app.activationPolicy == .regular,
+                      let bundleID = app.bundleIdentifier,
+                      (app.processIdentifier == myPID) == false,
+                      options.excludedBundleIDs.contains(bundleID) == false else { return nil }
+                return (app, bundleID)
+            }
+        guard apps.isEmpty == false else { return [] }
 
-        for app in NSWorkspace.shared.runningApplications {
-            guard app.activationPolicy == .regular,
-                  let bundleID = app.bundleIdentifier,
-                  app.processIdentifier != myPID,
-                  !options.excludedBundleIDs.contains(bundleID) else { continue }
+        // 显示器列表只取一次：NSScreen 查询不便宜，窗口多的时候会被调用几百次
+        let displays = ScreenGeometry.currentDisplays
+        let zOrder = windowZOrder()
 
-            let element = AX.application(for: app.processIdentifier)
-            AX.limitMessagingTimeout(element, seconds: 1.0)
+        let lock = NSLock()
+        var collected: [WindowSnapshot] = []
+        let semaphore = DispatchSemaphore(value: max(1, options.maxConcurrentApps))
+        let group = DispatchGroup()
+        let workers = DispatchQueue(label: "com.windowsnap.scan", attributes: .concurrent)
 
-            let axWindows = AX.windows(ofApplication: element)
-            guard !axWindows.isEmpty else { continue }
+        for entry in apps {
+            semaphore.wait()
+            group.enter()
+            workers.async {
+                defer {
+                    semaphore.signal()
+                    group.leave()
+                }
+                let snapshots = scan(app: entry.app,
+                                     bundleID: entry.bundleID,
+                                     displays: displays,
+                                     options: options)
+                guard snapshots.isEmpty == false else { return }
 
-            for (index, window) in axWindows.enumerated() {
-                AX.limitMessagingTimeout(window, seconds: 1.0)
-
-                guard let role = AX.string(window, AXAttr.role), role == AXRole.window else { continue }
-                let subrole = AX.string(window, AXAttr.subrole) ?? ""
-                if subrole == AXRole.sheet { continue }
-                if !options.includeDialogs && subrole == AXRole.dialog { continue }
-
-                guard let rect = AX.frame(of: window) else { continue }
-
-                let minimized = AX.bool(window, AXAttr.minimized) ?? false
-                if minimized && !options.includeMinimized { continue }
-                if !minimized && (rect.width < options.minimumWidth || rect.height < options.minimumHeight) { continue }
-
-                let display = ScreenGeometry.display(containing: rect)
-                let displayFrame = display?.frame ?? CGDisplayBounds(CGMainDisplayID())
-
-                let snapshot = WindowSnapshot(
-                    bundleID: bundleID,
-                    appName: app.localizedName ?? bundleID,
-                    title: AX.string(window, AXAttr.title) ?? "",
-                    role: role,
-                    subrole: subrole,
-                    frame: Frame(rect),
-                    displayID: display?.id ?? CGMainDisplayID(),
-                    displayIndex: display?.index ?? 0,
-                    displayName: display?.name ?? "主显示器",
-                    displayFrame: Frame(displayFrame),
-                    relativeFrame: Frame(rect).relative(to: displayFrame),
-                    isMinimized: minimized,
-                    isFullScreen: AX.bool(window, AXAttr.fullScreen) ?? false,
-                    zIndex: zOrder.value(pid: app.processIdentifier, rect: rect, fallback: index)
-                )
-                result.append(snapshot)
+                // z 序表是共享的，取号要加锁
+                lock.lock()
+                var numbered: [WindowSnapshot] = []
+                for var snapshot in snapshots {
+                    snapshot.zIndex = zOrder.value(pid: entry.app.processIdentifier,
+                                                   rect: snapshot.frame.cgRect,
+                                                   fallback: numbered.count)
+                    numbered.append(snapshot)
+                }
+                collected.append(contentsOf: numbered)
+                lock.unlock()
             }
         }
 
-        return result.sorted { $0.zIndex < $1.zIndex }
+        group.wait()
+        return collected.sorted { $0.zIndex < $1.zIndex }
+    }
+
+    /// 扫一个应用的所有窗口
+    private static func scan(app: NSRunningApplication,
+                             bundleID: String,
+                             displays: [DisplayInfo],
+                             options: ScanOptions) -> [WindowSnapshot] {
+        let element = AX.application(for: app.processIdentifier)
+        AX.limitMessagingTimeout(element, seconds: 1.0)
+
+        let axWindows = AX.windows(ofApplication: element)
+        guard axWindows.isEmpty == false else { return [] }
+
+        var snapshots: [WindowSnapshot] = []
+        for window in axWindows {
+            AX.limitMessagingTimeout(window, seconds: 1.0)
+
+            guard let role = AX.string(window, AXAttr.role), role == AXRole.window else { continue }
+            let subrole = AX.string(window, AXAttr.subrole) ?? ""
+            if subrole == AXRole.sheet { continue }
+            if options.includeDialogs == false && subrole == AXRole.dialog { continue }
+
+            guard let rect = AX.frame(of: window) else { continue }
+            let minimized = AX.bool(window, AXAttr.minimized) ?? false
+            if minimized && options.includeMinimized == false { continue }
+            if minimized == false && (rect.width < options.minimumWidth || rect.height < options.minimumHeight) { continue }
+
+            snapshots.append(makeSnapshot(window: window,
+                                          app: app,
+                                          bundleID: bundleID,
+                                          role: role,
+                                          subrole: subrole,
+                                          rect: rect,
+                                          minimized: minimized,
+                                          displays: displays))
+        }
+        return snapshots
     }
 
     // MARK: - 单个窗口
@@ -77,7 +115,7 @@ enum WindowScanner {
     static func snapshotFrontmostWindow(options: ScanOptions = ScanOptions()) -> WindowSnapshot? {
         guard let app = NSWorkspace.shared.frontmostApplication,
               let bundleID = app.bundleIdentifier,
-              app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+              (app.processIdentifier == ProcessInfo.processInfo.processIdentifier) == false,
               options.excludedBundleIDs.contains(bundleID) == false else { return nil }
 
         let appElement = AX.application(for: app.processIdentifier)
@@ -88,33 +126,44 @@ enum WindowScanner {
             target = AX.windows(ofApplication: appElement).first
         }
         guard let window = target else { return nil }
-        return makeSnapshot(window: window, app: app, bundleID: bundleID, zIndex: 0, options: options)
+        return snapshot(window: window, app: app, bundleID: bundleID)
     }
 
-    /// 从 AX 窗口元素造一条快照。「扫描全部」和「保存当前窗口」共用这套字段。
-    static func makeSnapshot(window: AXUIElement,
-                             app: NSRunningApplication,
-                             bundleID: String,
-                             zIndex: Int,
-                             options: ScanOptions) -> WindowSnapshot? {
+    /// 把一个 AX 窗口读成快照
+    static func snapshot(window: AXUIElement,
+                         app: NSRunningApplication,
+                         bundleID: String,
+                         displays: [DisplayInfo] = []) -> WindowSnapshot? {
         AX.limitMessagingTimeout(window, seconds: 1.0)
         guard let role = AX.string(window, AXAttr.role), role == AXRole.window else { return nil }
         guard let rect = AX.frame(of: window) else { return nil }
+        return makeSnapshot(window: window,
+                            app: app,
+                            bundleID: bundleID,
+                            role: role,
+                            subrole: AX.string(window, AXAttr.subrole) ?? "",
+                            rect: rect,
+                            minimized: AX.bool(window, AXAttr.minimized) ?? false,
+                            displays: displays.isEmpty ? ScreenGeometry.currentDisplays : displays)
+    }
 
-        let minimized = AX.bool(window, AXAttr.minimized) ?? false
-        if minimized == false && (rect.width < options.minimumWidth || rect.height < options.minimumHeight) {
-            return nil
-        }
-
-        let display = ScreenGeometry.display(containing: rect)
-        let displayFrame = display?.frame ?? CGDisplayBounds(CGMainDisplayID())
-
+    /// 已经读好的属性 -> 快照。显示器列表由调用方传进来，避免重复查询。
+    private static func makeSnapshot(window: AXUIElement,
+                                     app: NSRunningApplication,
+                                     bundleID: String,
+                                     role: String,
+                                     subrole: String,
+                                     rect: CGRect,
+                                     minimized: Bool,
+                                     displays: [DisplayInfo]) -> WindowSnapshot {
+        let display = ScreenGeometry.display(containing: rect, in: displays)
+        let displayFrame = display?.frame ?? rect
         return WindowSnapshot(
             bundleID: bundleID,
             appName: app.localizedName ?? bundleID,
             title: AX.string(window, AXAttr.title) ?? "",
             role: role,
-            subrole: AX.string(window, AXAttr.subrole) ?? "",
+            subrole: subrole,
             frame: Frame(rect),
             displayID: display?.id ?? CGMainDisplayID(),
             displayIndex: display?.index ?? 0,
@@ -123,22 +172,22 @@ enum WindowScanner {
             relativeFrame: Frame(rect).relative(to: displayFrame),
             isMinimized: minimized,
             isFullScreen: AX.bool(window, AXAttr.fullScreen) ?? false,
-            zIndex: zIndex)
+            zIndex: 0)
     }
 
     // MARK: - 前后顺序
 
     /// CGWindowList 是「前面优先」的顺序，用它给窗口排个 z 序
-    private struct ZOrderTable {
+    private final class ZOrderTable {
         private var entries: [(pid: pid_t, rect: CGRect, used: Bool)]
 
         init(_ list: [(pid: pid_t, rect: CGRect)]) {
             entries = list.map { (pid: $0.pid, rect: $0.rect, used: false) }
         }
 
-        mutating func value(pid: pid_t, rect: CGRect, fallback: Int) -> Int {
+        func value(pid: pid_t, rect: CGRect, fallback: Int) -> Int {
             for i in entries.indices {
-                guard !entries[i].used, entries[i].pid == pid else { continue }
+                guard entries[i].used == false, entries[i].pid == pid else { continue }
                 let candidate = entries[i].rect
                 if abs(candidate.minX - rect.minX) <= 2,
                    abs(candidate.minY - rect.minY) <= 2,

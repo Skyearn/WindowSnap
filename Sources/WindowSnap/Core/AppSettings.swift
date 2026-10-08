@@ -42,6 +42,12 @@ final class AppSettings: ObservableObject {
         didSet { persist() }
     }
 
+    /// 并行处理的应用数量上限。
+    /// 扫描和恢复都是「按应用」并行的，同一个应用内部保持串行。
+    @Published var parallelWorkers: Int = 4 {
+        didSet { persist() }
+    }
+
     /// 忽略这些应用（bundle id，换行或逗号分隔）
     @Published var excludedBundleIDsText: String = "" {
         didSet { persist() }
@@ -120,6 +126,9 @@ final class AppSettings: ObservableObject {
         if defaults.object(forKey: "showResultInMenuBar") != nil {
             showResultInMenuBar = defaults.bool(forKey: "showResultInMenuBar")
         }
+        if defaults.object(forKey: "parallelWorkers") != nil {
+            parallelWorkers = max(1, min(8, defaults.integer(forKey: "parallelWorkers")))
+        }
         excludedBundleIDsText = defaults.string(forKey: "excludedBundleIDsText") ?? ""
         autoRestoreOnDisplayChange = defaults.bool(forKey: "autoRestoreOnDisplayChange")
         if defaults.object(forKey: "autoRestoreOnAppLaunch") != nil {
@@ -151,6 +160,7 @@ final class AppSettings: ObservableObject {
         defaults.set(restoreStackingOrder, forKey: "restoreStackingOrder")
         defaults.set(restoreFullScreenWindows, forKey: "restoreFullScreenWindows")
         defaults.set(showResultInMenuBar, forKey: "showResultInMenuBar")
+        defaults.set(parallelWorkers, forKey: "parallelWorkers")
         defaults.set(excludedBundleIDsText, forKey: "excludedBundleIDsText")
         defaults.set(autoRestoreOnDisplayChange, forKey: "autoRestoreOnDisplayChange")
         defaults.set(displayChangeLayoutID, forKey: "displayChangeLayoutID")
@@ -212,6 +222,7 @@ final class AppSettings: ObservableObject {
         options.compatibilityMode = compatibilityMode
         options.restoreStackingOrder = restoreStackingOrder
         options.restoreFullScreenWindows = restoreFullScreenWindows
+        options.maxConcurrentApps = parallelWorkers
         return options
     }
 

@@ -18,6 +18,8 @@ final class WindowRestorer {
         var compatibilityMode = true
         /// 保存时是全屏的窗口，恢复时也切回全屏（默认关，容易吓人）
         var restoreFullScreenWindows = false
+        /// 同时处理几个应用。同一个应用内部始终串行。
+        var maxConcurrentApps = 4
 
         static var `default`: Options { Options() }
     }
@@ -71,57 +73,35 @@ final class WindowRestorer {
                     (lhs.snapshots.map(\.zIndex).min() ?? 0) < (rhs.snapshots.map(\.zIndex).min() ?? 0)
                 }
 
-            for group in groups {
-                let appName = AppLauncher.appName(for: group.bundleID)
-                let wasRunning = AppLauncher.isRunning(group.bundleID)
-                self.report(progress, "正在处理 \(appName)…")
+            // 不同应用之间互不干扰，可以并行搬；同一个应用内部仍然串行，
+            // 免得应用自己的窗口管理逻辑互相打架。
+            let resultLock = NSLock()
+            let semaphore = DispatchSemaphore(value: max(1, options.maxConcurrentApps))
+            let waitGroup = DispatchGroup()
+            let workers = DispatchQueue(label: "com.windowsnap.restore.app", attributes: .concurrent)
 
-                guard let pid = self.resolvePID(bundleID: group.bundleID,
-                                                options: options,
-                                                wasRunning: wasRunning,
-                                                progress: progress) else {
-                    report.failed += group.snapshots.count
-                    report.notes.append("\(appName)：无法启动")
-                    continue
-                }
-
-                let appElement = AX.application(for: pid)
-                AX.limitMessagingTimeout(appElement, seconds: 1.0)
-
-                let windows = self.waitForWindows(appElement,
-                                                  expected: group.snapshots.count,
-                                                  timeout: wasRunning ? 2.0 : options.appLaunchTimeout)
-                guard !windows.isEmpty else {
-                    report.failed += group.snapshots.count
-                    report.notes.append("\(appName)：没有找到窗口")
-                    continue
-                }
-
-                let candidates = WindowMatcher.match(snapshots: group.snapshots.sorted { $0.zIndex < $1.zIndex },
-                                                     to: windows)
-
-                for candidate in candidates {
-                    guard let window = candidate.window else {
-                        report.failed += 1
-                        continue
+            for entry in groups {
+                semaphore.wait()
+                waitGroup.enter()
+                workers.async {
+                    defer {
+                        semaphore.signal()
+                        waitGroup.leave()
                     }
-                    let outcome = self.apply(snapshot: candidate.snapshot,
-                                             window: window,
-                                             options: options,
-                                             appName: appName)
-                    switch outcome {
-                    case .restored:
-                        report.restored += 1
-                        restoredWindows.append((candidate.snapshot, window))
-                    case .skipped(let reason):
-                        report.skipped += 1
-                        if let reason { report.notes.append("\(appName)：\(reason)") }
-                    case .failed(let reason):
-                        report.failed += 1
-                        report.notes.append("\(appName)：\(reason)")
-                    }
+                    let outcome = self.restoreApp(bundleID: entry.bundleID,
+                                                  snapshots: entry.snapshots,
+                                                  options: options,
+                                                  progress: progress)
+                    resultLock.lock()
+                    report.restored += outcome.report.restored
+                    report.skipped += outcome.report.skipped
+                    report.failed += outcome.report.failed
+                    report.notes.append(contentsOf: outcome.report.notes)
+                    restoredWindows.append(contentsOf: outcome.windows)
+                    resultLock.unlock()
                 }
             }
+            waitGroup.wait()
 
             // 叠放顺序：从后往前 raise，最后抬的就在最前面
             if options.restoreStackingOrder {
@@ -129,7 +109,6 @@ final class WindowRestorer {
                 for item in ordered {
                     AX.limitMessagingTimeout(item.window, seconds: 0.5)
                     AX.perform(item.window, AXAction.raise)
-                    usleep(30_000)
                 }
             }
 
@@ -137,6 +116,61 @@ final class WindowRestorer {
             Log.info("恢复完成：\(report.summary)，耗时 \(elapsed)s")
             DispatchQueue.main.async { completion(report) }
         }
+    }
+
+    /// 处理一个应用的所有窗口（并行单元）
+    private func restoreApp(bundleID: String,
+                            snapshots: [WindowSnapshot],
+                            options: Options,
+                            progress: @escaping (String) -> Void
+    ) -> (report: RestoreReport, windows: [(WindowSnapshot, AXUIElement)]) {
+        var appReport = RestoreReport()
+        var restored: [(WindowSnapshot, AXUIElement)] = []
+        let appName = AppLauncher.appName(for: bundleID)
+        let wasRunning = AppLauncher.isRunning(bundleID)
+        self.report(progress, "正在处理 \(appName)…")
+
+        guard let pid = resolvePID(bundleID: bundleID,
+                                   options: options,
+                                   wasRunning: wasRunning,
+                                   progress: progress) else {
+            appReport.failed += snapshots.count
+            appReport.notes.append("\(appName)：无法启动")
+            return (appReport, restored)
+        }
+
+        let appElement = AX.application(for: pid)
+        AX.limitMessagingTimeout(appElement, seconds: 1.0)
+
+        let windows = waitForWindows(appElement,
+                                     expected: snapshots.count,
+                                     timeout: wasRunning ? 2.0 : options.appLaunchTimeout)
+        guard windows.isEmpty == false else {
+            appReport.failed += snapshots.count
+            appReport.notes.append("\(appName)：没有找到窗口")
+            return (appReport, restored)
+        }
+
+        let candidates = WindowMatcher.match(snapshots: snapshots.sorted { $0.zIndex < $1.zIndex },
+                                             to: windows)
+        for candidate in candidates {
+            guard let window = candidate.window else {
+                appReport.failed += 1
+                continue
+            }
+            switch apply(snapshot: candidate.snapshot, window: window, options: options, appName: appName) {
+            case .restored:
+                appReport.restored += 1
+                restored.append((candidate.snapshot, window))
+            case .skipped(let reason):
+                appReport.skipped += 1
+                if let reason { appReport.notes.append("\(appName)：\(reason)") }
+            case .failed(let reason):
+                appReport.failed += 1
+                appReport.notes.append("\(appName)：\(reason)")
+            }
+        }
+        return (appReport, restored)
     }
 
     // MARK: - 单个窗口
@@ -170,7 +204,8 @@ final class WindowRestorer {
         // 最小化的先叫回来，否则改位置多半无效
         if AX.bool(window, AXAttr.minimized) == true {
             AX.setBool(window, AXAttr.minimized, false)
-            usleep(250_000)
+            // 等它真的回来再继续，一般十几毫秒，比固定睡 250ms 快得多
+            waitUntil(timeout: 0.4) { AX.bool(window, AXAttr.minimized) == false }
         }
 
         guard snapshot.frame.isUsableWindowFrame else { return .skipped("窗口尺寸异常") }
@@ -183,7 +218,7 @@ final class WindowRestorer {
            AX.bool(window, AXAttr.enhancedUserInterface) == true {
             AX.setBool(window, AXAttr.enhancedUserInterface, false)
             restoreEnhancedUI = true
-            usleep(120_000)
+            usleep(60_000)
         }
 
         var success = moveAndResize(window: window, to: target.frame, raiseOnRetry: options.compatibilityMode)
@@ -191,7 +226,7 @@ final class WindowRestorer {
         if !success && options.compatibilityMode {
             // 有些应用要先把窗口抬到最前才接受几何变更
             AX.perform(window, AXAction.raise)
-            usleep(120_000)
+            usleep(40_000)
             success = moveAndResize(window: window, to: target.frame, raiseOnRetry: false)
         }
 
@@ -215,7 +250,7 @@ final class WindowRestorer {
         for attempt in 0..<3 {
             if attempt == 1 && raiseOnRetry {
                 AX.perform(window, AXAction.raise)
-                usleep(80_000)
+                usleep(40_000)
             }
             if attempt % 2 == 0 {
                 AX.setFrameOrigin(window, target.origin)
@@ -225,11 +260,13 @@ final class WindowRestorer {
                 AX.setFrameOrigin(window, target.origin)
             }
             AX.setFrameOrigin(window, target.origin)
-            usleep(90_000)
 
-            if let current = AX.frame(of: window), match(current, target, tolerance: tolerance) {
-                return true
+            // 轮询而不是死等：大多数窗口十几毫秒就到位了
+            let arrived = waitUntil(timeout: 0.15, interval: 0.01) {
+                guard let current = AX.frame(of: window) else { return false }
+                return self.match(current, target, tolerance: tolerance)
             }
+            if arrived { return true }
         }
 
         // 尺寸被应用的最小/最大尺寸限制住时，位置对上也认了
@@ -283,9 +320,25 @@ final class WindowRestorer {
             } else {
                 idle = 0
             }
-            usleep(200_000)
+            usleep(60_000)
         }
         return best
+    }
+
+    /// 等到条件成立或者超时。
+    ///
+    /// 比固定 sleep 快得多：应用通常十几毫秒就响应了，固定睡 90ms 是纯浪费；
+    /// 万一某个应用慢，也能一直等到超时为止。
+    @discardableResult
+    private func waitUntil(timeout: TimeInterval,
+                           interval: TimeInterval = 0.012,
+                           _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if condition() { return true }
+            if Date() >= deadline { return false }
+            usleep(useconds_t(interval * 1_000_000))
+        }
     }
 
     private func report(_ callback: @escaping (String) -> Void, _ message: String) {
