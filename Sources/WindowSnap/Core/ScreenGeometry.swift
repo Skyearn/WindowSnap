@@ -10,6 +10,20 @@ struct DisplayInfo: Hashable {
     var frame: CGRect
     /// 去掉菜单栏/Dock 之后的可用矩形（Quartz 全局坐标）
     var visibleFrame: CGRect
+
+    /// CGRect 的 Hashable 一致性是较新 SDK 才补上的，旧版 Xcode（15/16）上编译不过，
+    /// 所以这里手动实现 hash；== 仍然由编译器按成员合成。
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(index)
+        hasher.combine(name)
+        for rect in [frame, visibleFrame] {
+            hasher.combine(rect.origin.x)
+            hasher.combine(rect.origin.y)
+            hasher.combine(rect.size.width)
+            hasher.combine(rect.size.height)
+        }
+    }
 }
 
 /// 坐标系转换与显示器解析。
