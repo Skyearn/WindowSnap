@@ -10,7 +10,7 @@ macOS 窗口布局管理与恢复工具
 [![Release](https://img.shields.io/github/v/release/Skyearn/WindowSnap)](https://github.com/Skyearn/WindowSnap/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue)](https://www.apple.com/macos/)
 [![Swift](https://img.shields.io/badge/Swift-5.9-orange)](https://swift.org)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 </div>
 
@@ -405,4 +405,4 @@ git push origin v1.0.0
 
 ## 许可
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
