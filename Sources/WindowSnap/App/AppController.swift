@@ -420,14 +420,21 @@ final class AppController: ObservableObject {
                          })
     }
 
+    /// 最近用过的那个布局（⌃Z 默认恢复它）
+    var lastUsedLayout: Layout? {
+        if let raw = UUID(uuidString: settings.lastUsedLayoutID), let layout = store.layout(id: raw) {
+            return layout
+        }
+        if let id = lastRestoredLayoutID, let layout = store.layout(id: id) {
+            return layout
+        }
+        return nil
+    }
+
     /// 「恢复布局」这个全局动作：优先恢复最近用过的布局；
     /// 没有历史（或者布局被删了）就退回上一个；实在不行打开菜单让用户挑。
     func restoreLastUsedLayout() {
-        if let raw = UUID(uuidString: settings.lastUsedLayoutID), let layout = store.layout(id: raw) {
-            restore(layout: layout)
-            return
-        }
-        if let id = lastRestoredLayoutID, let layout = store.layout(id: id) {
+        if let layout = lastUsedLayout {
             restore(layout: layout)
             return
         }

@@ -85,15 +85,24 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         // ---- 恢复布局（所有保存的布局都收进这个展开菜单）
-        let restoreItem = NSMenuItem(title: "恢复布局", action: #selector(restoreDefault), keyEquivalent: "")
-        restoreItem.target = self
+        let restoreItem = NSMenuItem(title: "恢复布局", action: nil, keyEquivalent: "")
         restoreItem.isEnabled = store.layouts.isEmpty == false && controller.isRestoring == false
-        applyHotKey(settings.hotKey(for: .restoreLayout), to: restoreItem)
         let restoreMenu = NSMenu()
         if store.layouts.isEmpty {
             let empty = NSMenuItem(title: "还没有保存过布局", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             restoreMenu.addItem(empty)
+        } else {
+            // 快捷键挂在这里，而不是父项上：macOS 的父项右侧要放展开箭头，
+            // 不会再显示快捷键（Xcode 的「查找 ▸」也是这么处理的）
+            let quickTitle = controller.lastUsedLayout.map { "再次恢复「\($0.displayName)」" }
+                ?? "恢复上次用过的布局"
+            let quick = NSMenuItem(title: quickTitle, action: #selector(restoreDefault), keyEquivalent: "")
+            quick.target = self
+            quick.isEnabled = controller.isRestoring == false
+            applyHotKey(settings.hotKey(for: .restoreLayout), to: quick)
+            restoreMenu.addItem(quick)
+            restoreMenu.addItem(.separator())
         }
         for layout in store.layouts {
             let item = NSMenuItem(title: title(for: layout), action: #selector(restoreLayout(_:)), keyEquivalent: "")
@@ -113,25 +122,25 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let saveCurrent = NSMenuItem(title: "保存当前窗口布局", action: nil, keyEquivalent: "")
         saveCurrent.submenu = makeSaveMenu(newTitle: "新建布局…",
                                           newAction: #selector(saveCurrentWindowNew),
-                                          intoAction: #selector(saveCurrentWindowInto(_:)))
+                                          intoAction: #selector(saveCurrentWindowInto(_:)),
+                                          hotKey: settings.hotKey(for: .saveCurrentWindow))
         saveCurrent.isEnabled = controller.isRestoring == false
-        applyHotKey(settings.hotKey(for: .saveCurrentWindow), to: saveCurrent)
         menu.addItem(saveCurrent)
 
         let savePartial = NSMenuItem(title: "保存部分窗口布局", action: nil, keyEquivalent: "")
         savePartial.submenu = makeSaveMenu(newTitle: "新建布局…",
                                           newAction: #selector(savePartialNew),
-                                          intoAction: #selector(savePartialInto(_:)))
+                                          intoAction: #selector(savePartialInto(_:)),
+                                          hotKey: settings.hotKey(for: .savePartialWindows))
         savePartial.isEnabled = controller.isRestoring == false
-        applyHotKey(settings.hotKey(for: .savePartialWindows), to: savePartial)
         menu.addItem(savePartial)
 
         let saveAll = NSMenuItem(title: "保存所有窗口布局", action: nil, keyEquivalent: "")
         saveAll.submenu = makeSaveMenu(newTitle: "新建布局…",
                                       newAction: #selector(saveAllNew),
-                                      intoAction: #selector(saveAllInto(_:)))
+                                      intoAction: #selector(saveAllInto(_:)),
+                                      hotKey: settings.hotKey(for: .saveAllWindows))
         saveAll.isEnabled = controller.isRestoring == false
-        applyHotKey(settings.hotKey(for: .saveAllWindows), to: saveAll)
         menu.addItem(saveAll)
 
         if store.layouts.isEmpty == false {
@@ -174,10 +183,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     /// 构造「保存到…」的子菜单：先列已有布局，「新建布局…」永远放最下面
-    private func makeSaveMenu(newTitle: String, newAction: Selector, intoAction: Selector) -> NSMenu {
+    private func makeSaveMenu(newTitle: String,
+                             newAction: Selector,
+                             intoAction: Selector,
+                             hotKey: HotKeySpec?) -> NSMenu {
         let submenu = NSMenu()
         let newItem = NSMenuItem(title: newTitle, action: newAction, keyEquivalent: "")
         newItem.target = self
+        applyHotKey(hotKey, to: newItem)
 
         let layouts = controller?.store.layouts ?? []
         guard layouts.isEmpty == false else {
