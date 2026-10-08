@@ -6,7 +6,7 @@ import Combine
 /// 菜单栏空间很紧张，所以不在图标旁边写文字，而是整枚换图标：
 /// 就绪 / 处理中 / 完成 / 注意 / 失败 / 没权限。
 /// 具体文字放到 tooltip 和菜单第一项里。
-enum StatusIconState {
+enum StatusIconState: Equatable {
     case idle
     case busy
     case success
@@ -73,16 +73,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         let store = controller.store
         let settings = controller.settings
 
-        let header = NSMenuItem(title: "WindowSnap", action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-
-        if lastMessage.isEmpty == false {
-            let result = NSMenuItem(title: "上次：\(lastMessage)", action: nil, keyEquivalent: "")
-            result.isEnabled = false
-            menu.addItem(result)
-        }
-
+        // 菜单不设标题行，也不放「上次操作」——macOS 原生菜单都直接从功能项开始，
+        // 历史记录看日志就够了（菜单栏图标本身也会用图标表达状态）
         if controller.hasPermission == false {
             let warning = NSMenuItem(title: "⚠️ 需要辅助功能权限（点这里去开启）",
                                      action: #selector(grantPermission), keyEquivalent: "")
@@ -245,7 +237,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     /// 切换状态图标。`revertAfter` 有值时，过一会儿自动退回「就绪 / 没权限」。
     func setState(_ newState: StatusIconState, message: String? = nil, revertAfter: TimeInterval? = nil) {
         state = newState
-        if let message { lastMessage = message }
+        if let message {
+            lastMessage = message
+            // 菜单里不再显示「上次操作」，这类结果就落到日志里
+            if newState != .busy {
+                Log.info("状态：\(message)")
+            }
+        }
         applyIcon()
 
         stateResetItem?.cancel()
